@@ -1,0 +1,90 @@
+name: pl3-s1-diagnose (temporary, read-only)
+# Temporary diagnosis only. A successful run does NOT mean Stage 1 acceptance.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  s1-diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout read-only source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Inspect S1 HTTP and parser behavior (no page bodies or draw numbers)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import re
+          import urllib.error
+          import urllib.request
+          from urllib.parse import urlparse
+          import sources
+
+          with open("data/pl3_history.json", encoding="utf-8") as f:
+              historical = {row["issue_no"]: row for row in json.load(f)}
+
+          for issue in ("26296", "26300"):
+              print("=== S1 DIAGNOSTIC", issue, "===")
+              url = sources.S1_URL.format(period=issue)
+              if urlparse(url).hostname != "kaijiang.500.com":
+                  raise RuntimeError("Unexpected S1 host; aborting")
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": sources.UA,
+                           "Accept-Language": "zh-CN,zh;q=0.9"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=25) as response:
+                      code = response.status
+                      final_host = urlparse(response.geturl()).hostname
+                      raw = response.read(1_000_001)
+                      charset = response.headers.get_content_charset()
+              except urllib.error.HTTPError as exc:
+                  print("http_status:", exc.code, "error_type: HTTPError")
+                  continue
+              except Exception as exc:
+                  print("request_error_type:", type(exc).__name__)
+                  continue
+
+              print("http_status:", code)
+              print("final_host:", final_host)
+              print("redirected_to_other_host:", final_host != "kaijiang.500.com")
+              print("response_bytes_capped:", len(raw))
+              print("body_limit_exceeded:", len(raw) > 1_000_000)
+              print("response_sha256:", hashlib.sha256(raw).hexdigest())
+              print("declared_charset:", charset or "unspecified")
+              try:
+                  raw.decode("utf-8")
+                  detected_decode = "utf-8"
+              except UnicodeDecodeError:
+                  detected_decode = "gb18030-fallback"
+              print("decode_path:", detected_decode)
+              if code != 200 or len(raw) > 1_000_000:
+                  print("parse_not_attempted")
+                  continue
+
+              text = re.sub(r"\\s+", " ", re.sub(r"<[^>]+>", " ", sources.decode(raw)))
+              has_issue_marker = bool(re.search(r"第\\s*(\\d{5})\\s*期", text))
+              has_date_marker = bool(re.search(r"开奖日期[：:]\\s*\\d{4}年\\s*\\d{1,2}月\\s*\\d{1,2}日", text))
+              has_numbers_marker = bool(re.search(r"开奖号码[：:]\\s*\\d\\s*\\d\\s*\\d(?!\\d)", text))
+              print("has_issue_marker:", has_issue_marker)
+              print("has_date_marker:", has_date_marker)
+              print("has_numbers_marker:", has_numbers_marker)
+              print("has_closing_body:", bool(re.search(rb"</body\\s*>", raw, re.I)))
+              print("has_closing_html:", bool(re.search(rb"</html\\s*>", raw, re.I)))
+              parsed = sources.parse_500(issue, raw)
+              print("parser_result:", "PARSED" if parsed else "NONE")
+              ref = historical.get(issue)
+              print("in_local_snapshot:", ref is not None)
+              if parsed is not None and ref is not None:
+                  print("matches_snapshot:", parsed["date"] == ref["date"] and parsed["numbers"] == [int(n) for n in ref["numbers"]])
+          print("DIAGNOSTIC ONLY: Stage 1 remains FAIL pending S1 independent acceptance.")
+          PY
