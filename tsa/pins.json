@@ -1,0 +1,5 @@
+{
+  "_source": "用户于 2026-11-12 提供，称取自 FreeTSA 官网公布的 SHA-256；Claude 未能联网核对，须以实际下载文件比对为准",
+  "tsa.crt": "8bfb0305bb64e2571ca507552ef3245cb1c2fee8728e0ff8689225081ea13467",
+  "cacert.pem": "2151b61137ffa86bf664691ba67e7da0b19f98c758e3d228d5d8ebf27e044438"
+}

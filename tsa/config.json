@@ -1,0 +1,1 @@
+{"url": "https://freetsa.org/tsr", "cafile": "tsa/cacert.pem", "untrusted": "tsa/tsa.crt", "pinned": true}

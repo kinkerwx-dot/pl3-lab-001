@@ -1,0 +1,69 @@
+name: pl3-daily
+on:
+  schedule:
+    - cron: "0 7 * * *"          # UTC 07:00 = 北京时间 15:00（定时任务可能延迟或被跳过，缺失会如实体现在统计里）
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "conn-test=只测数据源/时间戳连通（只读，不写入）；run=执行每日流程"
+        type: choice
+        options: [conn-test, run]
+        default: conn-test
+      period:
+        description: "（可选）已在官方网站核实的期号，如 26302；留空则自动推算"
+        required: false
+        default: ""
+      official_confirmed:
+        description: "确认已在官方网站核实上面的期号"
+        type: boolean
+        default: false
+permissions: {}
+concurrency:
+  group: pl3-lab
+  cancel-in-progress: false
+jobs:
+  check:                          # 只读：测试与连通性
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 离线测试
+        run: for t in tests/test_*.py; do python3 "$t" || exit 1; done
+      - name: 连通性测试（只读）
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'conn-test'
+        run: python3 pl3_lab.py conn-test
+  record:                         # 唯一有写权限的任务；只在 run 模式或定时触发时运行，且 check 必须先通过
+    needs: check
+    if: github.event_name == 'schedule' || inputs.mode == 'run'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      PERIOD: ${{ inputs.period }}
+      CONFIRMED: ${{ inputs.official_confirmed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - name: 校验既有账本
+        run: python3 pl3_lab.py verify
+      - name: 同步开奖结果并锁定预测（含第三方时间戳）
+        run: |
+          if [ -n "$PERIOD" ] && [ "$CONFIRMED" = "true" ]; then
+            python3 pl3_lab.py daily --period "$PERIOD" --official-confirmed
+          else
+            python3 pl3_lab.py daily
+          fi
+      - name: 只追加检查
+        run: python3 check_append_only.py
+      - name: 提交并推送（仅当前面全部成功）
+        run: |
+          git config user.name "pl3-lab-bot"
+          git config user.email "pl3-lab-bot@users.noreply.github.com"
+          git add -A records
+          if git diff --cached --quiet; then echo "无变更"; exit 0; fi
+          git commit -m "pl3 daily"
+          git push

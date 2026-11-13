@@ -1,0 +1,19 @@
+name: pl3-conn-test
+# 阶段一：默认分支上只有这个手动、只读的工作流。没有定时触发，没有写权限。
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  conn-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 离线测试
+        run: for t in tests/test_*.py; do python3 "$t" || exit 1; done
+      - name: 连通性测试（S1 / S2 / TSA，只读）
+        run: python3 pl3_lab.py conn-test
