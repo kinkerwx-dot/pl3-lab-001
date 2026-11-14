@@ -221,3 +221,88 @@ jobs:
                       print("masked_context:", part[:150])
           print("DOM SHAPE DIAGNOSTIC ONLY: Stage 1 remains FAIL.")
           PY
+      - name: Validate Gansu history row layout against five frozen snapshot rows
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import datetime, hashlib, html, json, re, urllib.request
+          from html.parser import HTMLParser
+          from urllib.parse import urlparse
+
+          URL = "https://www.gstc.org.cn/wanfa/pl3_history"
+          class TextNodes(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.nodes = []
+              def handle_data(self, data):
+                  if data.strip():
+                      self.nodes.append(data)
+
+          with open("data/pl3_history.json", encoding="utf-8") as f:
+              history = json.load(f)
+          expected = {str(r["issue_no"]): r for r in history[-5:]}
+          request = urllib.request.Request(URL, headers={
+              "User-Agent": "Mozilla/5.0 (compatible; pl3-lab/2.0; research)",
+              "Accept-Language": "zh-CN,zh;q=0.9",
+          })
+          try:
+              with urllib.request.urlopen(request, timeout=25) as response:
+                  status = response.status
+                  host = urlparse(response.geturl()).hostname
+                  body = response.read(1_000_001)
+          except Exception as exc:
+              print("candidate_status: NETWORK_ERROR", type(exc).__name__)
+              raise SystemExit(0)  # diagnostic only, never an acceptance gate
+
+          print("candidate_http:", status)
+          print("candidate_host:", host)
+          print("candidate_bytes:", len(body))
+          print("candidate_sha256:", hashlib.sha256(body).hexdigest())
+          if status != 200 or host != "www.gstc.org.cn" or len(body) > 1_000_000:
+              print("candidate_status: INVALID_RESPONSE")
+              raise SystemExit(0)
+          try:
+              decoded = body.decode("utf-8")
+          except UnicodeDecodeError:
+              decoded = body.decode("gb18030", errors="replace")
+          parser = TextNodes()
+          parser.feed(decoded)
+          text = " ".join(html.unescape(" ".join(parser.nodes)).split())
+          start_marker = "开奖日期 开奖期次 开奖号码"
+          pos = text.find(start_marker)
+          if pos < 0:
+              print("candidate_status: TABLE_HEADER_NOT_FOUND")
+              raise SystemExit(0)
+          segment = text[pos + len(start_marker):]
+          for stop in ("当前第", "奖级对照", "友情链接"):
+              at = segment.find(stop)
+              if at >= 0:
+                  segment = segment[:at]
+          # Published HTML renders each of the three draw digits as a separate text node.
+          pattern = re.compile(r"(?<!\d)(20\d{2}-\d{1,2}-\d{1,2})\s+(\d{5})\s+(\d)\s+(\d)\s+(\d)(?!\d)")
+          found = {}
+          duplicate = set()
+          for match in pattern.finditer(segment):
+              draw_date, period, *digits = match.groups()
+              try:
+                  datetime.date.fromisoformat(draw_date)
+              except ValueError:
+                  continue
+              if period in found:
+                  duplicate.add(period)
+              found[period] = (draw_date, [int(n) for n in digits])
+          print("table_header_found: True")
+          print("matched_rows:", len(found))
+          print("duplicate_period_count:", len(duplicate))
+          print("latest_parsed_period:", max(found) if found else "none")
+          for period, reference in sorted(expected.items()):
+              if period in duplicate:
+                  result = "DUPLICATE"
+              elif period not in found:
+                  result = "MISSING"
+              else:
+                  draw_date, digits = found[period]
+                  result = "MATCH" if draw_date == reference["date"] and digits == [int(v) for v in reference["numbers"]] else "MISMATCH"
+              print("snapshot_check:", period, result)
+          print("CANDIDATE PARSER DIAGNOSTIC ONLY; no change to stage-1 acceptance.")
+          PY
