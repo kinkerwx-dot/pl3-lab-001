@@ -88,3 +88,78 @@ jobs:
                   print("matches_snapshot:", parsed["date"] == ref["date"] and parsed["numbers"] == [int(n) for n in ref["numbers"]])
           print("DIAGNOSTIC ONLY: Stage 1 remains FAIL pending S1 independent acceptance.")
           PY
+      - name: Probe official Gansu lottery publication (read-only; no draw values logged)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, html, json, re, urllib.error, urllib.request
+          from html.parser import HTMLParser
+          from urllib.parse import urlparse
+
+          URLS = (
+              "https://www.gstc.org.cn/wanfa/pl",
+              "https://www.gstc.org.cn/wanfa/pl3_history",
+          )
+          with open("data/pl3_history.json", encoding="utf-8") as f:
+              history = json.load(f)
+          ref = {r["issue_no"]: r for r in history[-5:]}
+
+          class TextOnly(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.parts = []
+              def handle_data(self, d):
+                  self.parts.append(d)
+
+          for url in URLS:
+              print("=== OFFICIAL GANSU CANDIDATE:", urlparse(url).path, "===")
+              req = urllib.request.Request(url, headers={
+                  "User-Agent": "Mozilla/5.0 (compatible; pl3-lab/2.0; research)",
+                  "Accept-Language": "zh-CN,zh;q=0.9",
+              })
+              try:
+                  with urllib.request.urlopen(req, timeout=25) as r:
+                      status = r.status
+                      final_host = urlparse(r.geturl()).hostname
+                      body = r.read(1_000_001)
+              except urllib.error.HTTPError as e:
+                  print("http_status:", e.code, "error_type: HTTPError")
+                  continue
+              except Exception as e:
+                  print("request_error_type:", type(e).__name__)
+                  continue
+              print("http_status:", status)
+              print("final_host:", final_host)
+              print("bytes_capped:", len(body))
+              print("too_large:", len(body) > 1_000_000)
+              print("sha256:", hashlib.sha256(body).hexdigest())
+              print("closing_html:", b"</html" in body.lower())
+              if status != 200 or final_host != "www.gstc.org.cn" or len(body) > 1_000_000:
+                  print("parse_skipped: host/status/size")
+                  continue
+              try:
+                  src = body.decode("utf-8")
+                  encoding = "utf-8"
+              except UnicodeDecodeError:
+                  src = body.decode("gb18030", errors="replace")
+                  encoding = "gb18030-fallback"
+              print("decode:", encoding)
+              p = TextOnly()
+              p.feed(src)
+              clean = " ".join(html.unescape(" ".join(p.parts)).split())
+              # Parse date, period, and three digits in the published history table.
+              matches = re.findall(r"(20\d{2}-\d{2}-\d{2})\s+(\d{5})\s+(\d{3})(?!\d)", clean)
+              got = {period: (dt, [int(x) for x in draw]) for dt, period, draw in matches}
+              print("history_rows_detected:", len(got))
+              print("matched_periods:", ",".join(sorted(got, reverse=True)[:3]) or "none")
+              flags = {}
+              for period, r in ref.items():
+                  if period not in got:
+                      flags[period] = "MISSING"
+                  else:
+                      date, nums = got[period]
+                      flags[period] = "MATCH" if date == r["date"] and nums == [int(x) for x in r["numbers"]] else "MISMATCH"
+              print("last5_snapshot_comparison:", flags)
+              print("has_recent_draw_claim:", bool(re.search(r"2630[1-9]", clean)))
+          print("CANDIDATE DIAGNOSTIC ONLY: no stage-1 acceptance implied.")
+          PY
