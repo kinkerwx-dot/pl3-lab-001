@@ -84,9 +84,9 @@ def sync(log=print):
     out, t = [], now_bj().isoformat(timespec="seconds")
 
     def other(n, rec):   # 取“另一个来源”对该期的读数
-        if "500.com" in rec["sources"]: return ff.get(n), "futurefortune"
-        try: return sources.fetch_500(n), "500.com"
-        except Exception as e: log(f"S1 不可用：{e}"); return None, "500.com"
+        if any(n in rec["sources"] for n in ("500.com", "gstc.org.cn")): return ff.get(n), "futurefortune"
+        try: return sources.fetch_500(n), "gstc.org.cn"
+        except Exception as e: log(f"S1 不可用：{e}"); return None, "gstc.org.cn"
 
     for n, o in res.items():
         if o["dual"]: continue
@@ -106,7 +106,7 @@ def sync(log=print):
         src = s1 or s2
         if not src: break
         out.append({"type": "result", "issue_no": p, "date": src["date"], "numbers": src["numbers"],
-                    "sources": [n for n, s in (("500.com", s1), ("futurefortune", s2)) if s],
+                    "sources": [n for n, s in (("gstc.org.cn", s1), ("futurefortune", s2)) if s],
                     "agree": "dual" if (s1 and s2) else "single", "retrieved_at": t})
         last = {"issue_no": p, "date": src["date"]}
     for r in out:
