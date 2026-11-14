@@ -163,3 +163,61 @@ jobs:
               print("has_recent_draw_claim:", bool(re.search(r"2630[1-9]", clean)))
           print("CANDIDATE DIAGNOSTIC ONLY: no stage-1 acceptance implied.")
           PY
+      - name: Inspect Gansu HTML text structure (sanitized; read-only)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections, hashlib, re, urllib.error, urllib.request
+          from html.parser import HTMLParser
+          from urllib.parse import urlparse
+
+          urls = ("https://www.gstc.org.cn/wanfa/pl",
+                  "https://www.gstc.org.cn/wanfa/pl3_history")
+          class Shape(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.tags = collections.Counter()
+                  self.text = []
+              def handle_starttag(self, tag, attrs):
+                  self.tags[tag] += 1
+              def handle_data(self, content):
+                  self.text.append(content)
+          for url in urls:
+              print("=== GANSU DOM SHAPE", urlparse(url).path, "===")
+              req = urllib.request.Request(url, headers={
+                  "User-Agent": "Mozilla/5.0 (compatible; pl3-lab/2.0; research)",
+                  "Accept-Language": "zh-CN,zh;q=0.9"
+              })
+              try:
+                  with urllib.request.urlopen(req, timeout=25) as resp:
+                      status = resp.status
+                      host = urlparse(resp.geturl()).hostname
+                      raw = resp.read(1_000_001)
+              except Exception as e:
+                  print("network_error:", type(e).__name__)
+                  continue
+              print("http_status:", status, "host:", host,
+                    "bytes:", len(raw), "sha256:", hashlib.sha256(raw).hexdigest())
+              if status != 200 or host != "www.gstc.org.cn" or len(raw) > 1_000_000:
+                  print("parse_skipped")
+                  continue
+              try: html = raw.decode("utf-8")
+              except UnicodeDecodeError: html = raw.decode("gb18030", errors="replace")
+              doc = Shape()
+              doc.feed(html)
+              clean = " ".join(" ".join(doc.text).split())
+              print("tag_counts:", {key: doc.tags[key] for key in
+                    ("table", "thead", "tbody", "tr", "td", "li", "span", "script")})
+              print("text_length:", len(clean))
+              print("date_pattern_count:", len(re.findall(r"20\d{2}[-/]\d{1,2}[-/]\d{1,2}", clean)))
+              for key in ("开奖日期", "开奖期次", "开奖公告",
+                          "26296", "26300", "26302", "26303"):
+                  i = clean.find(key)
+                  print("marker:", key, "present:", i >= 0)
+                  if i >= 0:
+                      start, end = max(0, i - 50), min(len(clean), i + len(key) + 85)
+                      part = re.sub(r"\d", "#", clean[start:end])
+                      # Only a tiny digit-masked snippet; no page body or draw numbers.
+                      print("masked_context:", part[:150])
+          print("DOM SHAPE DIAGNOSTIC ONLY: Stage 1 remains FAIL.")
+          PY
