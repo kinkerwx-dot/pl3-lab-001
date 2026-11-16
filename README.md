@@ -1,15 +1,16 @@
-# PL3-LAB-001 排列三零资金模拟研究（v2.2.1）
+# PL3-LAB-001 排列三零资金模拟研究（V2.2.3 候选；未正式上线）
 
-规则见 `PREREGISTRATION.md`（v1.2.1 草案，尚未发布、尚未生效）。**真实投注金额始终为 0。** 审计整改对照见 `AUDIT_RESPONSE.md`。
+规则见 `PREREGISTRATION.md`（v1.2.1 历史草案，尚未生效）及 `PREREGISTRATION_AMENDMENT_1.md`（待批准的来源与证据规则修订，不代表实验已开始）。**真实投注金额始终为 0。** 审计整改对照见 `AUDIT_RESPONSE.md`。
 
 ## 已验证 / 未验证
 - 已验证（离线）：`for t in tests/test_*.py; do python3 $t; done`
   模型与概率校验、期号推算、双渠道确认与冲突、哈希链与篡改/截断检测、只追加检查、
   时间戳验证与审计分类（用**本地自建**测试 TSA 演练，不是真实第三方）。核心仅用标准库；时间戳测试需要 `openssl`。
-- **未验证**：500.com 页面的真实格式、GitHub 服务器能否稳定访问数据源、任何真实 TSA、定时任务的实际触发。
+- **已验证（候选代码）**：GitHub Actions [#43788377303](https://github.com/kinkerwx-dot/pl3-lab-001/actions/runs/43788377303) 对提交 `897ae7be16c6bc2a677727987711a4803f04a276` 的八项离线测试、S1甘肃体彩20期窗口、S2交叉核对及真实 FreeTSA 连接均 PASS。
+- **未验证**：最终文档/发布提交的重跑、正式生产分支保护的全部细项、Stage2零资金写账／时间戳／审计端到端流程及每日定时可靠性。S1与S2双发布渠道一致不等于独立开奖源。
 
 ## 两阶段上线（缺一不可）
-**阶段一（只读验证）**：默认分支上**只放** `.github/workflows/pl3-conn-test.yml`（手动触发、只读、无定时）。`stage2/` 里的 `pl3-daily.yml` 在 `.github` 之外，不会被 Actions 识别。
+**阶段一（只读验证）**：默认分支上**只放** `.github/workflows/pl3-conn-test.yml`（手动触发、只读、无定时）；历史临时诊断工作流已从本候选分支清理，主分支需在获准合并后才同步。`stage2/` 里的 `pl3-daily.yml` 在 `.github` 之外，不会被 Actions 识别。
 1. 核实压缩包 SHA-256 与 `SHA256SUMS`。
 2. 预注册 v1.2.1（仅文字修订，规则同 v1.2）：用户已有条件批准（单一主挑战者 hot-v1、N\*=1,662）；条件是 §0 披露原样保留。
 3. 运行 `bash tsa/download_and_check.sh`：下载 FreeTSA 的 `cacert.pem`、`tsa.crt` 并与 `tsa/pins.json` 比对，不符则失败并删除文件；通过后连同证书一起提交。

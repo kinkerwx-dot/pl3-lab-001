@@ -56,9 +56,10 @@ today_real = tsa_day.date(); rec2 = dict(rec, date=today_real.isoformat())
 assert classify()[0] == "observation"
 # 构造一致情形：把记录与结果日期改成令牌日期，截止时间分别设为令牌之后/之前
 shutil.rmtree(tmp + "/records"); os.makedirs(tmp + "/records")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import evidence_fixtures as EF
+json.dump(EF.synth_rows(today_real), open(tmp + "/data/pl3_history.json", "w"), ensure_ascii=False)   # 以真实“今天”为锚的连续历史（不绑定具体年份）
 L.now_bj = lambda: datetime.combine(today_real, datetime.min.time(), tzinfo=L.BJ)  # 午夜，早于任何截止
-sources.fetch_ff = lambda *a, **k: ff; L.sync(lambda s: None)
-rows = L.load_history(); nxt = L.succ(rows[-1])
+rows = L.load_history(); nxt = L.next_period(rows, today_real); assert nxt and L.history_gap(rows) is None
 tip = L.predict(nxt, rows, "t"); tsr = local_stamp(d, tip)
 L.append(tmp + "/records/results.jsonl", dict(rec, issue_no=nxt, date=today_real.isoformat()))
 L.append(tmp + "/records/attestations.jsonl", {"period": nxt, "tip": tip, "tsa_url": "local-test", "tsr_b64": base64.b64encode(tsr).decode(), "retrieved_at": "x"})

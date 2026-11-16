@@ -1,0 +1,8 @@
+{
+  "channels": {
+    "gstc.org.cn": ["www.gstc.org.cn"],
+    "futurefortune": ["raw.githubusercontent.com"],
+    "official-manual": []
+  },
+  "note": "official-manual 的允许主机为空 = 人工恢复路径关闭。须由仓库所有者在预注册修订中登记官方公告所在主机后才能启用；变更本文件即为可审计的版本变更。任何 confirm（含自动）都必须有 records/evidence/ 下可读取的证据文件，哈希与内容经校验；人工核对还须有核对人（checker）。"
+}

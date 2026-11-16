@@ -4,7 +4,8 @@
   conn-test | daily [--period 26302 --official-confirmed] | verify | audit | stats
 v2 要点：生成器不再给任何预测贴“正式”标签；是否正式只由事后审计依据【第三方时间戳 + 双源开奖】判定。
 """
-import base64, hashlib, json, os, sys
+import base64, hashlib, json, os, re, sys
+from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
 import attest, models, sources
 from stats_exact import binom_sf
@@ -13,6 +14,12 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 COST, PRIZE, P0 = 2, 173, 6 / 1000       # 组选六：2 元/注；单注奖金 173 元（需持续核验官方规则）
 N_STAR = 1662                            # 确证分析所需正式期数：hot-v1 单一主检验，α=0.05 单侧精确二项，最少 16 次命中，对 p1=2/173 功效 80.03%
 ALPHA = 0.05
+S1_MIN_COMPARED = 10                     # S1 滚动窗口与 S2 至少要有这么多期可逐项对比，否则 conn-test 失败
+HISTORY_CHECK_TAIL = 300                 # 模型输入历史的最近这些期必须期号连续
+EVIDENCE_DIR = "records/evidence/"       # 人工核对的证据文件只能放在这里
+# 证据策略：渠道 -> 允许的证据主机。evidence_policy.json（若存在）覆盖默认值。
+# official-manual 默认为空 = 人工恢复路径【关闭】：必须由仓库所有者在预注册修订中登记官方主机后才能启用。
+DEFAULT_POLICY = {"channels": {"gstc.org.cn": ["www.gstc.org.cn"], "futurefortune": ["raw.githubusercontent.com"], "official-manual": []}}
 EXCLUDE_THROUGH = "26302"                # 26302 及更早的期号永不计入确证样本
 ROLE = {"hot-v1": "确证性挑战者", "cold-v1": "探索性对照", "random-baseline-v1": "随机基线"}
 CUTOFF_HM = (20, 30)                     # 实验内部锁定截止（北京时间），非官方停售时间，未经官方核验
@@ -40,14 +47,64 @@ def base_rows():
     return [{"issue_no": r["issue_no"], "date": r["date"], "numbers": [int(x) for x in r["numbers"]]} for r in b]
 
 
+def policy():
+    p = path("evidence_policy.json")
+    return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else DEFAULT_POLICY
+
+
+def _text_supports(raw, issue, date_, numbers):
+    """人工核对的证据是自由格式的网页/文本：在期号附近 100 字内同时出现该期日期与三位号码，才算“包含该结论”。
+    这是内容相关性检查，不是真实性证明；来源依据仍靠 URL 主机名单 + 证据文件 + 核对人 + 提交历史审计。"""
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", sources.decode(raw)))
+    y, m, d = date_.split("-")
+    dates = {date_, f"{y}/{m}/{d}", f"{y}年{int(m)}月{int(d)}日", f"{y}年{m}月{d}日"}
+    a, b, c = numbers
+    trip = re.compile(rf"(?<!\d){a}\D{{0,3}}{b}\D{{0,3}}{c}(?!\d)")
+    for mm in re.finditer(rf"(?<!\d){re.escape(issue)}(?!\d)", text):
+        win = text[max(0, mm.start() - 100): mm.end() + 100]
+        if any(x in win for x in dates) and trip.search(win): return True
+    return False
+
+
+def _valid_evidence(ev, channel, pol, issue, date_, numbers):
+    """证据必须真实可验：①https 且主机在该渠道的允许名单内；②证据文件存放在 records/evidence/ 下，读取后其 SHA-256 等于
+    evidence.sha256；③文件内容经渠道解析器（人工核对：文本检查）确实包含该期的日期与号码。
+    只有“域名可信 + 哈希格式正确”不够：没有可读取的证据文件、哈希不符、或内容不含该结论，一律不升级。
+    人工核对（official-manual）还须有核对人（checker）。"""
+    try:
+        u = urlparse(ev["url"])
+        if u.scheme != "https" or u.hostname not in pol["channels"].get(channel, []): return False
+        if not re.fullmatch(r"[0-9a-f]{64}", ev["sha256"]): return False
+        if datetime.fromisoformat(ev["retrieved_at"]).tzinfo is None: return False
+        f = ev["file"]
+        if not f.startswith(EVIDENCE_DIR) or os.path.normpath(f) != f: return False
+        fp = path(*f.split("/"))
+        if not os.path.isfile(fp) or os.path.getsize(fp) == 0: return False
+        raw = open(fp, "rb").read()
+        if hashlib.sha256(raw).hexdigest() != ev["sha256"]: return False
+        if channel == "official-manual":
+            return isinstance(ev.get("checker"), str) and len(ev["checker"].strip()) >= 2 and _text_supports(raw, issue, date_, numbers)
+        row = (sources.parse_gansu_history(raw) if channel == "gstc.org.cn" else sources.parse_ff(raw)).get(issue)
+        return bool(row) and row["date"] == date_ and list(row["numbers"]) == list(numbers)
+    except (KeyError, TypeError, ValueError, AttributeError, OSError):
+        return False
+
+
+def confirm_is_valid(r, o):
+    """confirm 把 single 升级为 dual 须同时满足：号码与日期一致；渠道在策略内且不同于原记录已用的渠道；证据真实可验（见 _valid_evidence）。
+    只有“号码相同”不够。无法验证时保持 single。"""
+    ch, pol = r.get("channel"), policy()
+    return bool(r["numbers"] == o["numbers"] and r["date"] == o["date"] and ch in pol["channels"] and ch not in o["sources"]
+                and _valid_evidence(r.get("evidence") or {}, ch, pol, r["issue_no"], r["date"], r["numbers"]))
+
+
 def load_results():
-    """issue_no -> {"rec","dual"}；单源结果只有在后续 confirm 记录（第二来源一致）出现后才算 dual。"""
+    """issue_no -> {"rec","dual"}；单渠道结果只有在后续【有效】confirm 记录（见 confirm_is_valid）出现后才算 dual。"""
     out = {}
     for r in read(path("records", "results.jsonl")):
         if r.get("type") == "result": out[r["issue_no"]] = {"rec": r, "dual": r["agree"] == "dual"}
         elif r.get("type") == "confirm" and r["issue_no"] in out:
-            o = out[r["issue_no"]]["rec"]
-            if r["numbers"] == o["numbers"] and r["date"] == o["date"]: out[r["issue_no"]]["dual"] = True
+            if confirm_is_valid(r, out[r["issue_no"]]["rec"]): out[r["issue_no"]]["dual"] = True
     return out
 
 
@@ -64,15 +121,48 @@ def data_sha256():
     return h.hexdigest()
 
 
-def succ(last):
+def _next_ok(a_no, a_date, b_no, b_date):
+    """b 是否紧接 a：同年 +1（日期也在同一年），或跨年且 b 为次年 001（日期为次年）；开奖日期必须严格向后推进
+    （可以隔很多天：停售假期；不能同一天或更早）。不依赖“12-31 必有开奖”。"""
+    yy, n = int(a_no[:2]), int(a_no[2:]); da, db = date.fromisoformat(a_date), date.fromisoformat(b_date)
+    return db > da and ((b_no == f"{yy:02d}{n + 1:03d}" and db.year == da.year) or (b_no == f"{(yy + 1) % 100:02d}001" and db.year == da.year + 1))
+
+
+def history_gap(rows):
+    """模型输入历史（双渠道确认）必须期号连续；有缺口意味着存在未经双渠道确认的开奖，返回描述，否则 None。"""
+    seg = rows[-HISTORY_CHECK_TAIL:]
+    for a, b in zip(seg, seg[1:]):
+        if not _next_ok(a["issue_no"], a["date"], b["issue_no"], b["date"]):
+            return f"{a['issue_no']}（{a['date']}）与 {b['issue_no']}（{b['date']}）之间不连续"
+    return None
+
+
+def target_gap(rows, period, draw_date):
+    """目标期必须紧接【已确认历史】的末尾（期号连续、开奖日严格向后）。否则中间有未确认或缺失的结果，返回描述；人工指定期号也不能绕过。"""
+    last = rows[-1]
+    if _next_ok(last["issue_no"], last["date"], period, draw_date.isoformat()): return None
+    pend = sorted(p for p, o in load_results().items() if not o["dual"] and p > last["issue_no"])
+    return (f"目标期号 {period}（开奖日 {draw_date}）不是已确认历史末尾 {last['issue_no']}（{last['date']}）的紧接下一期"
+            + (f"；其间有未经双渠道确认的结果：{', '.join(pend)}" if pend else ""))
+
+
+def succ_candidates(last):
+    """下一期的可能期号：同年 +1，或次年 001。上一期若是 12-31 开的，只可能跨年；否则（如 12-31 无开奖）两者都有可能。"""
     yy, n = int(last["issue_no"][:2]), int(last["issue_no"][2:])
-    return f"{(yy + 1) % 100:02d}001" if last["date"].endswith("-12-31") else f"{yy:02d}{n + 1:03d}"
+    nxt = f"{(yy + 1) % 100:02d}001"
+    return [nxt] if last["date"].endswith("-12-31") else [f"{yy:02d}{n + 1:03d}", nxt]
+
+
+def succ(last):
+    return succ_candidates(last)[0]
 
 
 def next_period(rows, today):
     """仅当最近一期（双源确认）开奖日为昨天才自动推算；停售假期后、结果未双源确认等情形返回 None，不猜。"""
-    last = rows[-1]
-    return succ(last) if date.fromisoformat(last["date"]) == today - timedelta(days=1) else None
+    last = rows[-1]; ld = date.fromisoformat(last["date"])
+    if ld != today - timedelta(days=1): return None
+    yy, n = int(last["issue_no"][:2]), int(last["issue_no"][2:])
+    return f"{yy:02d}{n + 1:03d}" if today.year == ld.year else f"{(yy + 1) % 100:02d}001"   # 以“今天”所在年份判断是否跨年
 
 
 def sync(log=print):
@@ -83,10 +173,20 @@ def sync(log=print):
     except Exception as e: ff = {}; log(f"S2 不可用：{e}")
     out, t = [], now_bj().isoformat(timespec="seconds")
 
-    def other(n, rec):   # 取“另一个来源”对该期的读数
-        if "500.com" in rec["sources"]: return ff.get(n), "futurefortune"
-        try: return sources.fetch_500(n), "500.com"
-        except Exception as e: log(f"S1 不可用：{e}"); return None, "500.com"
+    def other(period, rec):   # 取“另一个渠道”对该期的读数
+        if any(ch in rec["sources"] for ch in ("500.com", "gstc.org.cn")): return ff.get(period), "futurefortune"
+        try: return sources.fetch_500(period), "gstc.org.cn"
+        except Exception as e: log(f"S1 不可用：{e}"); return None, "gstc.org.cn"
+
+    files = {}   # 待写入的证据文件：相对路径 -> 原始字节
+
+    def evidence(channel, with_file=False):
+        ev = sources.EVIDENCE.get(channel)
+        if not ev or not ev.get("raw"): return None
+        e = {"url": ev["url"], "sha256": ev["sha256"], "retrieved_at": t}
+        if with_file:
+            e["file"] = f"{EVIDENCE_DIR}{channel}-{ev['sha256'][:16]}{'.html' if channel == 'gstc.org.cn' else '.json'}"
+        return e
 
     for n, o in res.items():
         if o["dual"]: continue
@@ -94,21 +194,35 @@ def sync(log=print):
         if s is None: continue
         if s["numbers"] != o["rec"]["numbers"] or s["date"] != o["rec"]["date"]:
             sys.exit(f"数据源冲突 {n}：已停止，未写入任何记录，请用官方网站人工核对")
-        out.append({"type": "confirm", "issue_no": n, "date": s["date"], "numbers": s["numbers"], "sources": o["rec"]["sources"] + [nm], "agree": "dual", "retrieved_at": t})
+        ev = evidence(nm, with_file=True)
+        if not ev: log(f"{n}：第二渠道读数一致，但没有可追溯的证据，保持 single"); continue
+        files[ev["file"]] = sources.EVIDENCE[nm]["raw"]
+        out.append({"type": "confirm", "issue_no": n, "date": s["date"], "numbers": s["numbers"], "channel": nm, "evidence": ev,
+                    "sources": o["rec"]["sources"] + [nm], "agree": "dual", "retrieved_at": t})
     last = allrows[-1]
     for _ in range(14):
-        p = succ(last)
-        try: s1 = sources.fetch_500(p)
-        except Exception as e: s1 = None; log(f"S1 不可用：{e}")
-        s2 = ff.get(p)
+        found = None
+        for p in succ_candidates(last):
+            try: s1 = sources.fetch_500(p)
+            except Exception as e: s1 = None; log(f"S1 不可用：{e}")
+            s2 = ff.get(p)
+            if s1 or s2: found = (p, s1, s2); break
+        if not found: break
+        p, s1, s2 = found
         if s1 and s2 and (s1["numbers"] != s2["numbers"] or s1["date"] != s2["date"]):
             sys.exit(f"数据源冲突 {p}：已停止，未写入任何记录，请用官方网站人工核对")
         src = s1 or s2
-        if not src: break
-        out.append({"type": "result", "issue_no": p, "date": src["date"], "numbers": src["numbers"],
-                    "sources": [n for n, s in (("500.com", s1), ("futurefortune", s2)) if s],
+        if not _next_ok(last["issue_no"], last["date"], p, src["date"]):
+            sys.exit(f"期号 {p}（{src['date']}）与上一期 {last['issue_no']}（{last['date']}）不衔接：已停止，未写入任何记录，请用官方网站人工核对")
+        chans = [nm for nm, s in (("gstc.org.cn", s1), ("futurefortune", s2)) if s]
+        out.append({"type": "result", "issue_no": p, "date": src["date"], "numbers": src["numbers"], "sources": chans,
+                    "evidence": {nm: evidence(nm) for nm in chans if evidence(nm)},
                     "agree": "dual" if (s1 and s2) else "single", "retrieved_at": t})
         last = {"issue_no": p, "date": src["date"]}
+    for fn, raw in files.items():                       # 先落证据文件，再写账本记录
+        fp = path(*fn.split("/")); os.makedirs(os.path.dirname(fp), exist_ok=True)
+        if not os.path.exists(fp):
+            with open(fp, "wb") as f: f.write(raw)
     for r in out:
         append(path("records", "results.jsonl"), r)
         log(f"{r['type']} {r['issue_no']} {r['date']} {''.join(map(str, r['numbers']))} ({r['agree']})")
@@ -124,6 +238,10 @@ def predict(period, rows, note):
     recs = read(path("records", "predictions.jsonl"))
     if any(r["period"] == period for r in recs):
         print(f"{period} 期已锁定，跳过"); return None
+    gap = history_gap(rows); tgap = None if gap else target_gap(rows, period, t.date())
+    if gap or tgap:
+        sys.exit(f"{'模型输入历史不连续：' + gap if gap else tgap}。存在未经双渠道确认或缺失的开奖（见 records/results.jsonl 中 agree=single），"
+                 f"{period} 期记为缺失，不补预测；请对照官方公告人工核对，并按 evidence_policy.json 追加带有效证据（含证据文件）的 confirm 记录后再运行")
     hist = [r["numbers"] for r in rows]; prev = recs[-1]["hash"] if recs else "GENESIS"
     env = {k: os.environ.get(k, "") for k in ("GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "GITHUB_EVENT_NAME")}
     for m, v in models.MODELS.items():
@@ -256,39 +374,44 @@ def _age_days(d): return (now_bj().date() - date.fromisoformat(d)).days
 
 
 def check_s1(rows, max_age):
-    """S1：最近5期与本地逐项一致；并向前探测本地快照之后的新期，报告“最新可验证期号”；日期不得早于 today−max_age。"""
-    bad = []
-    for r in rows[-5:]:
-        try: s1 = sources.fetch_500(r["issue_no"])
-        except Exception as e: s1 = None; print("S1", e)
-        if not s1 or s1["numbers"] != r["numbers"] or s1["date"] != r["date"]: bad.append(r["issue_no"])
-    got, last, err = {}, rows[-1], ""
-    for _ in range(14):
-        p = succ(last)
-        try: s1 = sources.fetch_500(p)
-        except Exception as e: s1 = None; err = type(e).__name__; print("S1", e)
-        if not s1: break
-        got[p] = s1; last = {"issue_no": p, "date": s1["date"]}
-    age = _age_days(last["date"]); fails = []
-    if bad: fails.append(f"最近5期不一致或解析失败{bad}")
-    if err: fails.append(f"探测新期时出错({err})")
-    if age > max_age: fails.append(f"数据过旧：最新可验证 {last['date']} 距今 {age} 天 > {max_age}")
-    return (not fails), f"最新可验证 {last['issue_no']}（{last['date']}，距今{age}天）" + ("；" + "；".join(fails) if fails else ""), got
+    """S1 = 甘肃体彩历史页（约 20 期滚动窗口）。本地快照的最近几期会随时间滑出窗口，所以不再固定核对“最后 5 期”，而是：
+    窗口严格解析成功；窗口内期号连续；与本地历史在【所有重叠期】上逐项一致（重叠为 0 也不放水地如实报告）；最新日期不得过旧。
+    窗口与 S2 的逐项交叉核对在 check_s2 里做。返回 (通过, 说明, 窗口)。"""
+    try: win = sources.fetch_s1_window()
+    except Exception as e: print("S1", e); return False, f"无法读取或解析（{type(e).__name__}）", {}
+    local = {r["issue_no"]: r for r in rows}
+    order = sorted(win, key=lambda p: (win[p]["date"], p)); fails = []
+    gaps = [f"{a}→{b}" for a, b in zip(order, order[1:]) if not _next_ok(a, win[a]["date"], b, win[b]["date"])]
+    bad = [p for p in win if p in local and (local[p]["numbers"] != win[p]["numbers"] or local[p]["date"] != win[p]["date"])]
+    lp = order[-1]; age = _age_days(win[lp]["date"])
+    if gaps: fails.append(f"窗口期号不连续{gaps}")
+    if bad: fails.append(f"与本地历史在重叠期上不一致{bad}")
+    if age > max_age: fails.append(f"数据过旧：最新 {win[lp]['date']} 距今 {age} 天 > {max_age}")
+    n_loc = sum(1 for p in win if p in local)
+    return (not fails), f"窗口 {len(win)} 期（{order[0]}–{lp}），最新 {lp}（{win[lp]['date']}，距今{age}天），与本地历史重叠 {n_loc} 期" + ("；" + "；".join(fails) if fails else ""), win
 
 
-def check_s2(rows, max_age, new_from_s1):
-    """S2：近30期无缺失/不符；最新期号与日期不得过旧；与 S1 在新期上必须一致。"""
+def check_s2(rows, max_age, s1_window):
+    """S2：近30期无缺失/不符；最新期号与日期不得过旧；与 S1 窗口在【全部可对比期】上逐项一致（不止新期）。
+    S1 不可用时（已判 FAIL）不再叠加 S1 交叉核对。"""
     try: ff = sources.fetch_ff()
     except Exception as e: print("S2", e); return False, f"无法读取（{type(e).__name__}）"
     tail = rows[-30:]
     miss = [r["issue_no"] for r in tail if r["issue_no"] not in ff]
     diff = [r["issue_no"] for r in tail if r["issue_no"] in ff and (ff[r["issue_no"]]["numbers"] != r["numbers"] or ff[r["issue_no"]]["date"] != r["date"])]
-    cross = [p for p, s1 in new_from_s1.items() if p in ff and (ff[p]["numbers"] != s1["numbers"] or ff[p]["date"] != s1["date"])]
     lp = max(ff, key=lambda k: (ff[k]["date"], k)); age = _age_days(ff[lp]["date"]); fails = []
     if miss or diff: fails.append(f"近30期缺失{miss}、不符{diff}")
-    if cross: fails.append(f"与S1在新期上不一致{cross}")
+    n_cmp = 0
+    if s1_window:
+        comparable = [p for p in s1_window if p <= lp]       # S2 比 S1 落后的那几期不比较，其余必须齐全且一致
+        absent = [p for p in comparable if p not in ff]
+        cross = [p for p in comparable if p in ff and (ff[p]["numbers"] != s1_window[p]["numbers"] or ff[p]["date"] != s1_window[p]["date"])]
+        n_cmp = len(comparable) - len(absent)
+        if absent: fails.append(f"S2 缺少 S1 窗口内的期号{absent}")
+        if cross: fails.append(f"与S1在重叠期上不一致{cross}")
+        if len(comparable) < S1_MIN_COMPARED: fails.append(f"S1 窗口与 S2 可对比期数不足（{len(comparable)} < {S1_MIN_COMPARED}）")
     if age > max_age: fails.append(f"数据过旧：最新 {ff[lp]['date']} 距今 {age} 天 > {max_age}")
-    return (not fails), f"{len(ff)} 期，最新 {lp}（{ff[lp]['date']}，距今{age}天）" + ("；" + "；".join(fails) if fails else "")
+    return (not fails), f"{len(ff)} 期，最新 {lp}（{ff[lp]['date']}，距今{age}天），与S1窗口逐项对比 {n_cmp} 期" + ("；" + "；".join(fails) if fails else "")
 
 
 def check_tsa():
@@ -305,8 +428,8 @@ def check_tsa():
 def conn_test(max_age=2):
     """阶段一验收：S1、S2、TSA 三项必须全部 PASS，任何一项失败/缺失都返回非零退出码；三项分别输出。"""
     rows = load_history()
-    ok1, d1, got = check_s1(rows, max_age)
-    ok2, d2 = check_s2(rows, max_age, got)
+    ok1, d1, win = check_s1(rows, max_age)
+    ok2, d2 = check_s2(rows, max_age, win)
     ok3, d3 = check_tsa()
     print("== conn-test 汇总 ==")
     print(f"本地快照最新: {rows[-1]['issue_no']}（{rows[-1]['date']}）；新鲜度阈值 {max_age} 天（遇停售假期需人工判断）")

@@ -1,0 +1,8 @@
+# V2.2.2 S1 candidate delta manifest — SHA-256 of exact UTF-8 file bytes
+# Reference baseline: SHA256SUMS (unchanged V2.2.1 historical manifest).
+# Candidate technical PASS applies to commit 6b4b774f277d24de38c2f4da81395b4e13b71b31 (run #43559090448).
+# Subsequent changes to descriptive documents/this manifest are not covered by that specific tested commit.
+# This manifest lists code changes only; it is not a complete release checksum.
+c74f694b7d29bc8f8981fa138c63d9c8f512dbf33a27406052dfb8f35e1c78ed  sources.py
+6a48f89c1033510117b98f9eff17ed3d39ee5a65570cd90e6c4e3303e4c06ab1  pl3_lab.py
+71bafb016839b5fc23e65b8ae0135bb5c7b668969cb5fbe9a608fcbf11350046  tests/test_gansu_s1.py
