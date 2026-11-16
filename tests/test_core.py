@@ -55,7 +55,11 @@ sources.fetch_ff = lambda *a, **k: ff_only
 L.sync(lambda s: None); o = L.load_results()[full[-1]["issue_no"]]; assert o["rec"]["agree"] == "single" and not o["dual"]
 assert L.load_history()[-1]["issue_no"] == full[-2]["issue_no"] and L.next_period(L.load_history(), d0 + __import__("datetime").timedelta(days=1)) is None
 S1["on"] = True; sources.fetch_500 = lambda p: {"period": p, **ff_only[p]} if p in ff_only else None
+sys.path.insert(0, os.path.join(SRC, "tests")); import evidence_fixtures as EF
+raw1 = EF.gansu_page(ff_only); sources.EVIDENCE["gstc.org.cn"] = {"url": "https://www.gstc.org.cn/wanfa/pl3_history", "sha256": EF.sha(raw1), "raw": raw1}
 L.sync(lambda s: None); assert L.load_results()[full[-1]["issue_no"]]["dual"] and L.load_history()[-1]["issue_no"] == full[-1]["issue_no"]
+cf = [r for r in L.read(tmp + "/records/results.jsonl") if r["type"] == "confirm"][-1]               # 自动 confirm 附带真实证据文件，哈希与内容都可验
+assert cf["channel"] == "gstc.org.cn" and os.path.isfile(tmp + "/" + cf["evidence"]["file"]) and EF.sha(open(tmp + "/" + cf["evidence"]["file"], "rb").read()) == cf["evidence"]["sha256"]
 # 冲突：两阶段，任何记录都不得写入
 before = open(tmp + "/records/results.jsonl").read()
 nx = L.succ(L.load_history()[-1])

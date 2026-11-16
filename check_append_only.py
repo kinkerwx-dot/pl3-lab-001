@@ -13,6 +13,9 @@ def main():
     bad = []
     for line in sh("git", "status", "--porcelain", "-uall").decode().splitlines():
         code, p = line[:2].strip(), line[3:]
+        if p.startswith("records/evidence/") and ".." not in p.split("/"):          # 证据文件：只允许新增，不允许修改/删除
+            if code not in ("??", "A"): bad.append(f"证据文件只能新增，不得修改或删除: {p}")
+            continue
         if p not in ALLOWED: bad.append(f"不允许改动的路径: {p}"); continue
         if code == "M":
             if not open(p, "rb").read().startswith(sh("git", "show", f"HEAD:{p}")): bad.append(f"非追加改动: {p}")
